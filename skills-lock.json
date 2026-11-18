@@ -1,0 +1,40 @@
+{
+  "version": 2,
+  "skills": {
+    "auto-editor-transcribe": {
+      "source": "WyattBlue/auto-editor",
+      "commit": "689097a6857f038e18e0a9e1cf1523e89abd594a",
+      "sourceType": "github",
+      "skillPath": "skills/auto-editor-transcribe/SKILL.md",
+      "computedHash": "fee46dd86dd276227f56ca20844cfdf57daac226e0861a379152d809ab5e3bba"
+    },
+    "baoyu-youtube-transcript": {
+      "source": "JimLiu/baoyu-skills",
+      "commit": "ca703c2d7c2c4399a1dc0cf82224f8551e05a96d",
+      "sourceType": "github",
+      "skillPath": "skills/baoyu-youtube-transcript/SKILL.md",
+      "computedHash": "91f17e97ca2b82a6a34fc9fd30710121d9f93907982af75f9b8eef244af620e0"
+    },
+    "ffmpeg": {
+      "source": "digitalsamba/claude-code-video-toolkit",
+      "commit": "a89a32078bf1bad0107a43c228de38ced2baee89",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/ffmpeg/SKILL.md",
+      "computedHash": "ff8e85c81bac9a0bc655b94893f06e60e34c42f3faa98ee60e2cdd51a0215013"
+    },
+    "transcribe": {
+      "source": "openai/skills",
+      "commit": "49f948faa9258a0c61caceaf225e179651397431",
+      "sourceType": "github",
+      "skillPath": "skills/.curated/transcribe/SKILL.md",
+      "computedHash": "af633f8a0a8c4d2a8694d17c6ff4ed5c5afbe71197bd387d8f8563b2b8b7b47e"
+    },
+    "video-editing": {
+      "source": "affaan-m/ECC",
+      "commit": "3f14a103a8694e51c1df9a806217a6d0b5f7a6f7",
+      "sourceType": "github",
+      "skillPath": "skills/video-editing/SKILL.md",
+      "computedHash": "b1a66c7e9337e7030cfef7c5a8b2a519123e63c8fef710105118eab89641e505"
+    }
+  }
+}
