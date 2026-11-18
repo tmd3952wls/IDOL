@@ -2,6 +2,9 @@
 work/
 output/
 
+# 비밀번호가 들어가는 설정 파일
+.env
+
 __pycache__/
 *.pyc
 desktop.ini
