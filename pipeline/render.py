@@ -34,7 +34,7 @@ FONT = ROOT / "assets/fonts/Jua-Regular.ttf"          # 배민 주아
 FACE_MODEL = ROOT / "assets/models/yunet.onnx"
 TEXT_MODEL = ROOT / "assets/models/text_det.onnx"
 COMMENT_EVERY = 1.5                 # 하단 댓글 교체 간격(초)
-STYLE_VERSION = "v14"  # 레이아웃을 바꾸면 올린다 (기존 구간을 모두 다시 만들게 됨)
+STYLE_VERSION = "v16"  # 레이아웃을 바꾸면 올린다 (기존 구간을 모두 다시 만들게 됨)
 TITLE_COLOR = "#ffe600"
 AVATAR_COLORS = ["#6fbf73", "#f2a03d", "#5b7fd1", "#d96a8a", "#8e6fd1", "#49b3b3"]
 PUSH_PER_FRAME = 0.0006             # 조각 안에서 천천히 밀고 들어가는 속도
@@ -55,6 +55,8 @@ CAPTION_STYLES = {
                                r"\t(240,360,\fscx114\fscy114)\t(360,480,\fscx100\fscy100)"),       # 웃음·애교: 통통 튐
     "point":    ("4DFFA6", 92, r"\fscx40\fscy140\t(0,130,\fscx100\fscy100)"),                      # 핵심 단어: 옆으로 쫙 펼쳐짐
 }
+
+POINT_STYLES = {"shout", "laugh", "point"}
 
 
 def run(cmd, cwd=None):
@@ -280,6 +282,7 @@ def merge_boxes(boxes, cw, ch, limit=6):
 def face_crop(clip, a, b, sw, sh, focus, fill):
     """조각(a~b초)에서 가장 큰 얼굴만 화면에 꽉 차도록 자를 영역 (w, h, x, y)과, 그 안에 남은 방송 문구 위치."""
     ratio = W / CLIP_H
+    _textcache.clear()
     times = sorted({round(a + 0.08 + (b - a - 0.16) * i / 4, 2) for i in range(5)})
     imgs = [im for im in (frame_at(clip, t, sw, sh) for t in times) if im is not None]
     picks = []
@@ -310,11 +313,52 @@ def face_crop(clip, a, b, sw, sh, focus, fill):
         x = min(max(x, 0), sw - cw)
         y = min(max(y, 0), sh - ch)
         crop = (int(cw) // 2 * 2, int(ch) // 2 * 2, int(x), int(y))
-    # 그래도 남은 방송 문구는 블러로 가린다
+    # 방송 문구가 남으면 문구를 피하는 다른 자리를 찾는다. 못 찾으면 문구 위치를 돌려주고, 그 컷은 버린다.
+    boxes = crop_boxes(imgs, crop, sw, face)
+    if boxes:
+        clean = clean_crop(imgs, crop, sw, sh, face)
+        if clean:
+            return clean, []
+    return crop, boxes
+
+
+def crop_boxes(imgs, crop, sw, face):
     found = []
     for im in imgs:
         found += text_boxes(im, crop, sw, face)
-    return crop, merge_boxes(found, crop[0], crop[1])
+    return merge_boxes(found, crop[0], crop[1])
+
+
+def clean_crop(imgs, crop, sw, sh, face):
+    """방송 문구가 하나도 걸리지 않는 자리(더 좁히거나 옆·위아래로 옮긴)를 찾는다. 없으면 None."""
+    ratio = W / CLIP_H
+    last = None
+    for scale in (1.0, 0.88, 0.76, 0.64, 0.52):
+        ch = crop[1] * scale
+        if face:
+            cx, cy, fh = face
+            ch = max(ch, fh * 1.15, sh * 0.2)
+            cw = ch * ratio
+            # 얼굴이 화면 안에 다 들어오는 범위에서만 옮긴다
+            xlo, xhi = max(0, cx + fh * 0.45 - cw), min(sw - cw, cx - fh * 0.45)
+            ylo, yhi = max(0, cy + fh * 0.6 - ch), min(sh - ch, cy - fh * 0.62)
+        else:
+            ch = max(ch, sh * 0.2)
+            cw = ch * ratio
+            xlo, xhi = sw * 0.08, sw * 0.92 - cw
+            ylo, yhi = sh * SAFE_TOP, sh * SAFE_BOTTOM - ch
+        if last is not None and abs(ch - last) < 2:
+            break
+        last = ch
+        if xhi < xlo or yhi < ylo:
+            continue
+        for fy in (0.45, 0.2, 0.7, 0.0, 1.0):
+            for fx in (0.5, 0.3, 0.7, 0.1, 0.9, 0.0, 1.0):
+                cand = (int(cw) // 2 * 2, int(ch) // 2 * 2,
+                        int(xlo + (xhi - xlo) * fx), int(ylo + (yhi - ylo) * fy))
+                if not crop_boxes(imgs, cand, sw, face):
+                    return cand
+    return None
 
 
 def write_ass(lines, parts, path):
@@ -365,27 +409,51 @@ def compose(seg, clip, frame, lines, ws, comments, out, rng):
     # 자막 한 줄이 시작될 때마다, 그리고 장면이 바뀔 때마다 컷을 나눈다(한 마디 = 한 컷)
     edges = sorted(set(scene_cuts(clip)) | {round(c["t0"] - 0.04, 2) for c in lines})
     parts = speech.chunks(ranges, edges)
+    focus = float(seg.get("focus", 0.5))
+    # 컷마다 자를 자리를 정한다. 방송 문구를 피할 자리가 없는 컷은 블러로 가리지 않는다:
+    #  - 포인트 자막(shout/laugh/point)이 걸린 컷은 소리는 살리고, 화면만 가까운 깨끗한 컷의 인물로 바꾼다
+    #  - 그 밖의 컷은 통째로 버린다
+    found = [face_crop(clip, a, b, sw, sh, focus, FACE_FILLS[k % len(FACE_FILLS)])
+             for k, (a, b) in enumerate(parts)]
+    clean = [k for k, (_, boxes) in enumerate(found) if not boxes]
+    if not clean:
+        raise RuntimeError("방송 문구를 피할 수 있는 컷이 하나도 없습니다")
+    shots = []                                          # (소리 구간, 화면 구간, 자를 자리)
+    dropped = borrowed = 0
+    for k, (a, b) in enumerate(parts):
+        crop, boxes = found[k]
+        if not boxes:
+            shots.append(((a, b), (a, b), crop))
+            continue
+        punch = any(a - 0.05 <= c["t0"] < b and c.get("style") in POINT_STYLES for c in lines)
+        j = min(clean, key=lambda j: (abs(j - k), j > k))
+        if not punch or abs(j - k) > 3:
+            dropped += 1
+            continue
+        cw, ch, cx, cy = found[j][0]                    # 같은 화면이 반복돼 보이지 않게 조금 더 당긴다
+        nw, nh = int(cw * 0.82) // 2 * 2, int(ch * 0.82) // 2 * 2
+        shots.append(((a, b), parts[j], (nw, nh, cx + (cw - nw) // 2, cy + int((ch - nh) * 0.4))))
+        borrowed += 1
+    parts = [x[0] for x in shots]
+    lines = [c for c in lines if any(a - 0.05 <= c["t0"] < b for a, b in parts)]
     n = len(parts)
     total = sum(b - a for a, b in parts)
-    focus = float(seg.get("focus", 0.5))
     ass = out.with_suffix(".ass")
     write_ass(lines, parts, ass)
 
-    blurred = 0
     g = "[1:v]fps=30,split=" + str(n) + "".join(f"[b{k}]" for k in range(n)) + ";"
     g += f"[1:a]asplit={n}" + "".join(f"[s{k}]" for k in range(n)) + ";"
-    for k, (a, b) in enumerate(parts):
-        (cw, ch, cx, cy), boxes = face_crop(clip, a, b, sw, sh, focus, FACE_FILLS[k % len(FACE_FILLS)])
-        blurred += bool(boxes)
-        g += f"[b{k}]trim={a}:{b},setpts=PTS-STARTPTS,crop={cw}:{ch}:{cx}:{cy}"
-        for j, (bx, by, bw, bh) in enumerate(boxes):
-            r = max(2, min(bw, bh) // 5)
-            g += (f",split[p{k}_{j}][q{k}_{j}];[q{k}_{j}]crop={bw}:{bh}:{bx}:{by},"
-                  f"boxblur={r}:3:{max(1, r // 2)}:3[r{k}_{j}];[p{k}_{j}][r{k}_{j}]overlay={bx}:{by}")
-        g += (f",scale={W * 2}:{CLIP_H * 2},setsar=1,"
+    for k, ((a, b), (va, vb), (cw, ch, cx, cy)) in enumerate(shots):
+        d = b - a
+        if (va, vb) == (a, b):
+            g += f"[b{k}]trim={a}:{b},setpts=PTS-STARTPTS"
+        else:                                           # 빌려 온 화면은 소리 길이에 맞게 늘이거나 자른다
+            r = max(1.0, d / (vb - va))
+            g += (f"[b{k}]trim={va}:{vb},setpts=(PTS-STARTPTS)*{r:.4f},fps=30,"
+                  f"trim=0:{d:.3f},setpts=PTS-STARTPTS")
+        g += (f",crop={cw}:{ch}:{cx}:{cy},scale={W * 2}:{CLIP_H * 2},setsar=1,"
               f"zoompan=z='1+{PUSH_PER_FRAME}*on':x='iw/2-(iw/zoom/2)':y='max(0,ih*0.44-(ih/zoom/2))':"
               f"d=1:s={W}x{CLIP_H}:fps=30[v{k}];")
-        d = b - a
         g += (f"[s{k}]atrim={a}:{b},asetpts=PTS-STARTPTS,afade=t=in:d=0.02,"
               f"afade=t=out:st={max(0, d - 0.03):.3f}:d=0.03[a{k}];")
     g += "".join(f"[v{k}][a{k}]" for k in range(n)) + f"concat=n={n}:v=1:a=1[cv][ca];"
@@ -412,7 +480,7 @@ def compose(seg, clip, frame, lines, ws, comments, out, rng):
          "-map", "[vo]", "-map", "[ao]", "-t", f"{total:.3f}",
          "-c:v", "libx264", "-preset", "medium", "-crf", "19", "-c:a", "aac", "-b:a", "160k", "-ac", "2",
          "-video_track_timescale", "30000", str(out)], cwd=ROOT)
-    return total, n, src_dur, blurred, slots
+    return total, n, src_dur, (dropped, borrowed), slots
 
 
 def comment_pool(work):
@@ -510,7 +578,7 @@ def main():
                 total, nr, src, nb, nc = compose(seg, clips[sid], frame, lines, snapped.get(sid, []),
                                                  comments, part, random.Random(key))
                 print(f"[{i + 1}/{len(segs)}] {seg['keyword']}: 원본 {src:.1f}초 -> {total:.1f}초 "
-                      f"(컷 {nr}개, 문구 블러 {nb}컷, 자막 {len(lines)}줄, 댓글 {nc}개)")
+                      f"(컷 {nr}개, 방송 문구로 버린 컷 {nb[0]}개·화면 교체 {nb[1]}개, 자막 {len(lines)}줄, 댓글 {nc}개)")
             except Exception as e:  # noqa: BLE001
                 print(f"  건너뜀 {seg['keyword']}: {str(e)[:500]}", file=sys.stderr)
                 continue

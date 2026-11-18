@@ -3,12 +3,14 @@
 사용: python pipeline/send_mail.py "<이름>" [--check]
   --check: 메일을 보내지 않고 설정과 SMTP 로그인만 확인한다.
 보내는 것: 제목·태그·원본 출처(meta.txt 내용), 장면 모음(contact.jpg),
-          영상(<이름>.mp4, MAIL_MAX_MB 이하일 때만. 넘으면 PC의 파일 위치만 본문에 적는다)
+          영상(<이름>.mp4. MAIL_MAX_MB를 넘으면 그 크기에 맞게 줄인 사본 <이름>_mail.mp4를 첨부한다)
+네이버 SMTP는 메일 한 통에 약 38MB까지 받는다(첨부는 인코딩으로 37% 커지므로 MAIL_MAX_MB는 25 이하로).
 설정은 프로젝트 루트의 .env 에서 읽는다 (.env.example 참고).
 """
 import mimetypes
 import smtplib
 import ssl
+import subprocess
 import sys
 from email.message import EmailMessage
 from pathlib import Path
@@ -42,6 +44,24 @@ def connect(env):
         server.starttls(context=ctx)
     server.login(env["SMTP_USER"], env["SMTP_PASSWORD"])
     return server
+
+
+def shrink(video, limit_mb):
+    """메일 한도에 맞게 영상을 줄인 사본(<이름>_mail.mp4)을 만든다. 720x1280, 한도에 맞춘 비트레이트."""
+    out = video.with_name(video.stem + "_mail.mp4")
+    dur = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0",
+                                str(video)], capture_output=True, text=True).stdout.strip())
+    total_kbps = limit_mb * 8000 * 0.93 / dur
+    for attempt in range(3):
+        v = max(200, int(total_kbps - 96))
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(video), "-vf", "scale=720:-2",
+                        "-c:v", "libx264", "-preset", "slow", "-b:v", f"{v}k", "-maxrate", f"{int(v * 1.3)}k",
+                        "-bufsize", f"{v * 2}k", "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart",
+                        str(out)], check=True)
+        if out.stat().st_size / 1_000_000 <= limit_mb:
+            return out
+        total_kbps *= 0.85
+    return None
 
 
 def attach(msg, path):
@@ -78,16 +98,22 @@ def main():
     msg["From"] = env["SMTP_USER"]
     recipients = [x.strip() for x in env["MAIL_TO"].split(",") if x.strip()]
     msg["To"] = ", ".join(recipients)
+    to_attach = video
     if size_mb <= limit:
         note = f"영상 파일({size_mb:.0f}MB)을 첨부했습니다."
     else:
-        note = (f"영상 파일은 {size_mb:.0f}MB로 첨부 한도({limit:.0f}MB)를 넘어 첨부하지 않았습니다.\n"
-                f"PC의 위치: {video}")
+        to_attach = shrink(video, limit)   # 한도를 넘으면 메일용으로 줄여서 첨부
+        if to_attach:
+            note = (f"영상을 메일용으로 줄여 첨부했습니다 (원본 {size_mb:.0f}MB -> "
+                    f"{to_attach.stat().st_size / 1_000_000:.0f}MB, 720x1280).\n원본 위치: {video}")
+        else:
+            note = (f"영상 파일은 {size_mb:.0f}MB로, 줄여도 첨부 한도({limit:.0f}MB)에 맞지 않아 첨부하지 않았습니다.\n"
+                    f"PC의 위치: {video}")
     msg.set_content(f"{body}\n\n----\n{note}\n")
     if sheet.exists():
         attach(msg, sheet)
-    if size_mb <= limit:
-        attach(msg, video)
+    if to_attach:
+        attach(msg, to_attach)
 
     try:
         server = connect(env)
